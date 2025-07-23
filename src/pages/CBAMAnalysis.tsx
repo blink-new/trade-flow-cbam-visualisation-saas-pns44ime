@@ -1,102 +1,230 @@
-import { useState, useEffect } from 'react'
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card'
+import { useState, useEffect, useCallback } from 'react'
+import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card'
 import { Badge } from '../components/ui/badge'
 import { Progress } from '../components/ui/progress'
-import { Leaf, AlertTriangle, CheckCircle, TrendingUp } from 'lucide-react'
+import { 
+  Leaf, 
+  AlertTriangle, 
+  CheckCircle, 
+  TrendingUp,
+  Factory,
+  Zap
+} from 'lucide-react'
 import { blink } from '../blink/client'
 
-export function CBAMAnalysis() {
-  const [cbamData, setCbamData] = useState<any[]>([])
-  const [loading, setLoading] = useState(true)
-  const [stats, setStats] = useState({
-    totalRecords: 0,
-    cbamRelevant: 0,
-    totalCarbonIntensity: 0,
-    categories: {} as Record<string, number>
-  })
+interface CBAMRecord {
+  id: string
+  productCode: string
+  productDescription: string
+  originCountry: string
+  quantity: number
+  value: number
+  cbamaCategory: string
+  riskLevel: 'low' | 'medium' | 'high'
+  complianceScore: number
+}
 
-  const loadCBAMData = async () => {
+interface CBAMStats {
+  totalRecords: number
+  highRiskRecords: number
+  averageComplianceScore: number
+  categoriesBreakdown: { [key: string]: number }
+  countryRisks: { [key: string]: number }
+}
+
+export function CBAMAnalysis() {
+  const [cbamaRecords, setCbamaRecords] = useState<CBAMRecord[]>([])
+  const [stats, setStats] = useState<CBAMStats>({
+    totalRecords: 0,
+    highRiskRecords: 0,
+    averageComplianceScore: 0,
+    categoriesBreakdown: {},
+    countryRisks: {}
+  })
+  const [loading, setLoading] = useState(true)
+  const [selectedCategory, setSelectedCategory] = useState<string | null>(null)
+
+  const calculateRiskLevel = useCallback((country: string, category: string): 'low' | 'medium' | 'high' => {
+    // High-risk countries for CBAM (simplified logic)
+    const highRiskCountries = ['China', 'India', 'Russia', 'Turkey', 'Ukraine']
+    const mediumRiskCountries = ['Brazil', 'South Africa', 'Indonesia', 'Thailand']
+    
+    // High-risk categories
+    const highRiskCategories = ['steel', 'cement', 'aluminum']
+    
+    if (highRiskCountries.includes(country) && highRiskCategories.includes(category)) {
+      return 'high'
+    } else if (highRiskCountries.includes(country) || highRiskCategories.includes(category)) {
+      return 'medium'
+    } else if (mediumRiskCountries.includes(country)) {
+      return 'medium'
+    }
+    
+    return 'low'
+  }, [])
+
+  const calculateComplianceScore = useCallback((riskLevel: string, value: number): number => {
+    const baseScore = riskLevel === 'high' ? 40 : riskLevel === 'medium' ? 70 : 85
+    const valueAdjustment = Math.min(value / 100000, 15) // Adjust based on trade value
+    return Math.max(0, Math.min(100, baseScore - valueAdjustment))
+  }, [])
+
+  const loadCBAMData = useCallback(async () => {
     try {
       const user = await blink.auth.me()
+      
+      // Load CBAM-relevant records
       const records = await blink.db.tradeRecords.list({
-        where: { userId: user.id }
+        where: { 
+          userId: user.id,
+          isCbamRelevant: "1"
+        }
       })
       
-      const cbamRecords = records.filter(record => Number(record.isCbamRelevant) > 0)
+      // Process records with risk analysis
+      const processedRecords: CBAMRecord[] = records.map(record => {
+        const category = record.cbamaCategory || 'unknown'
+        const riskLevel = calculateRiskLevel(record.originCountry, category)
+        const complianceScore = calculateComplianceScore(riskLevel, record.value)
+        
+        return {
+          id: record.id,
+          productCode: record.productCode,
+          productDescription: record.productDescription,
+          originCountry: record.originCountry,
+          quantity: record.quantity,
+          value: record.value,
+          cbamaCategory: category,
+          riskLevel,
+          complianceScore
+        }
+      })
       
-      const categories = cbamRecords.reduce((acc, record) => {
-        const category = record.cbamCategory || 'Unknown'
-        acc[category] = (acc[category] || 0) + 1
-        return acc
-      }, {} as Record<string, number>)
-
-      const totalCarbonIntensity = cbamRecords.reduce((sum, record) => 
-        sum + (record.carbonIntensity || 0), 0
-      )
-
+      // Calculate statistics
+      const totalRecords = processedRecords.length
+      const highRiskRecords = processedRecords.filter(r => r.riskLevel === 'high').length
+      const averageComplianceScore = totalRecords > 0 
+        ? processedRecords.reduce((sum, r) => sum + r.complianceScore, 0) / totalRecords 
+        : 0
+      
+      // Categories breakdown
+      const categoriesBreakdown: { [key: string]: number } = {}
+      processedRecords.forEach(record => {
+        categoriesBreakdown[record.cbamaCategory] = (categoriesBreakdown[record.cbamaCategory] || 0) + 1
+      })
+      
+      // Country risks
+      const countryRisks: { [key: string]: number } = {}
+      processedRecords.forEach(record => {
+        const riskScore = record.riskLevel === 'high' ? 3 : record.riskLevel === 'medium' ? 2 : 1
+        countryRisks[record.originCountry] = (countryRisks[record.originCountry] || 0) + riskScore
+      })
+      
+      setCbamaRecords(processedRecords)
       setStats({
-        totalRecords: records.length,
-        cbamRelevant: cbamRecords.length,
-        totalCarbonIntensity,
-        categories
+        totalRecords,
+        highRiskRecords,
+        averageComplianceScore,
+        categoriesBreakdown,
+        countryRisks
       })
       
-      setCbamData(cbamRecords)
     } catch (error) {
       console.error('Error loading CBAM data:', error)
     } finally {
       setLoading(false)
     }
-  }
+  }, [calculateRiskLevel, calculateComplianceScore])
 
   useEffect(() => {
     loadCBAMData()
-  }, [])
+  }, [loadCBAMData])
+
+  const getRiskColor = (riskLevel: string) => {
+    switch (riskLevel) {
+      case 'high':
+        return 'bg-red-100 text-red-800'
+      case 'medium':
+        return 'bg-yellow-100 text-yellow-800'
+      case 'low':
+        return 'bg-green-100 text-green-800'
+      default:
+        return 'bg-gray-100 text-gray-800'
+    }
+  }
+
+  const getRiskIcon = (riskLevel: string) => {
+    switch (riskLevel) {
+      case 'high':
+        return <AlertTriangle className="h-4 w-4" />
+      case 'medium':
+        return <AlertTriangle className="h-4 w-4" />
+      case 'low':
+        return <CheckCircle className="h-4 w-4" />
+      default:
+        return <CheckCircle className="h-4 w-4" />
+    }
+  }
+
+  const getCategoryIcon = (category: string) => {
+    switch (category) {
+      case 'steel':
+      case 'aluminum':
+        return <Factory className="h-5 w-5" />
+      case 'electricity':
+        return <Zap className="h-5 w-5" />
+      default:
+        return <Leaf className="h-5 w-5" />
+    }
+  }
+
+  const formatCurrency = (value: number) => {
+    return new Intl.NumberFormat('en-US', {
+      style: 'currency',
+      currency: 'USD',
+      minimumFractionDigits: 0,
+      maximumFractionDigits: 0
+    }).format(value)
+  }
 
   if (loading) {
     return (
       <div className="space-y-6">
-        <div className="animate-pulse">
-          <div className="h-8 bg-muted rounded w-1/3 mb-4"></div>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-            {[...Array(3)].map((_, i) => (
-              <div key={i} className="h-32 bg-muted rounded"></div>
-            ))}
-          </div>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+          {[...Array(3)].map((_, i) => (
+            <Card key={i}>
+              <CardContent className="p-6">
+                <div className="animate-pulse">
+                  <div className="h-4 bg-gray-200 rounded w-3/4 mb-2"></div>
+                  <div className="h-8 bg-gray-200 rounded w-1/2"></div>
+                </div>
+              </CardContent>
+            </Card>
+          ))}
         </div>
       </div>
     )
   }
 
-  const complianceScore = stats.totalRecords > 0 
-    ? Math.round(((stats.totalRecords - stats.cbamRelevant) / stats.totalRecords) * 100)
-    : 100
-
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-2xl font-bold text-foreground mb-2">CBAM Analysis</h1>
-        <p className="text-muted-foreground">
-          Carbon Border Adjustment Mechanism compliance analysis and carbon intensity tracking
+        <h1 className="text-3xl font-bold text-primary">CBAM Analysis</h1>
+        <p className="text-muted-foreground mt-2">
+          Carbon Border Adjustment Mechanism compliance analysis and risk assessment
         </p>
       </div>
 
-      {/* CBAM Overview */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+      {/* Overview Stats */}
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
         <Card>
           <CardContent className="p-6">
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-sm font-medium text-muted-foreground">CBAM Relevant</p>
-                <p className="text-2xl font-bold text-foreground">{stats.cbamRelevant}</p>
-                <p className="text-xs text-muted-foreground">
-                  {stats.totalRecords > 0 
-                    ? `${Math.round((stats.cbamRelevant / stats.totalRecords) * 100)}% of total`
-                    : '0% of total'
-                  }
-                </p>
+                <p className="text-sm font-medium text-muted-foreground">CBAM Records</p>
+                <p className="text-2xl font-bold">{stats.totalRecords}</p>
               </div>
-              <Leaf className="w-8 h-8 text-green-500" />
+              <Leaf className="h-8 w-8 text-green-600" />
             </div>
           </CardContent>
         </Card>
@@ -105,13 +233,13 @@ export function CBAMAnalysis() {
           <CardContent className="p-6">
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-sm font-medium text-muted-foreground">Carbon Intensity</p>
-                <p className="text-2xl font-bold text-foreground">
-                  {stats.totalCarbonIntensity.toFixed(1)}
+                <p className="text-sm font-medium text-muted-foreground">High Risk</p>
+                <p className="text-2xl font-bold text-red-600">{stats.highRiskRecords}</p>
+                <p className="text-xs text-muted-foreground">
+                  {stats.totalRecords > 0 ? Math.round((stats.highRiskRecords / stats.totalRecords) * 100) : 0}% of total
                 </p>
-                <p className="text-xs text-muted-foreground">tCO2e/tonne</p>
               </div>
-              <TrendingUp className="w-8 h-8 text-orange-500" />
+              <AlertTriangle className="h-8 w-8 text-red-600" />
             </div>
           </CardContent>
         </Card>
@@ -121,168 +249,220 @@ export function CBAMAnalysis() {
             <div className="flex items-center justify-between">
               <div>
                 <p className="text-sm font-medium text-muted-foreground">Compliance Score</p>
-                <p className="text-2xl font-bold text-foreground">{complianceScore}%</p>
-                <Progress value={complianceScore} className="mt-2" />
+                <p className="text-2xl font-bold">{Math.round(stats.averageComplianceScore)}</p>
+                <p className="text-xs text-muted-foreground">Average score</p>
               </div>
-              {complianceScore >= 80 ? (
-                <CheckCircle className="w-8 h-8 text-green-500" />
-              ) : (
-                <AlertTriangle className="w-8 h-8 text-yellow-500" />
+              <TrendingUp className="h-8 w-8 text-accent" />
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardContent className="p-6">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-sm font-medium text-muted-foreground">Categories</p>
+                <p className="text-2xl font-bold">{Object.keys(stats.categoriesBreakdown).length}</p>
+              </div>
+              <Factory className="h-8 w-8 text-accent" />
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+
+      {/* Compliance Score Overview */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center space-x-2">
+            <TrendingUp className="h-5 w-5" />
+            <span>Overall Compliance Status</span>
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          <div className="space-y-4">
+            <div className="flex items-center justify-between">
+              <span className="text-sm font-medium">Compliance Score</span>
+              <span className="text-sm font-bold">{Math.round(stats.averageComplianceScore)}/100</span>
+            </div>
+            <Progress value={stats.averageComplianceScore} className="w-full h-3" />
+            <div className="grid grid-cols-3 gap-4 text-center">
+              <div className="p-3 bg-green-50 rounded-lg">
+                <p className="text-lg font-bold text-green-600">
+                  {cbamaRecords.filter(r => r.riskLevel === 'low').length}
+                </p>
+                <p className="text-xs text-green-600">Low Risk</p>
+              </div>
+              <div className="p-3 bg-yellow-50 rounded-lg">
+                <p className="text-lg font-bold text-yellow-600">
+                  {cbamaRecords.filter(r => r.riskLevel === 'medium').length}
+                </p>
+                <p className="text-xs text-yellow-600">Medium Risk</p>
+              </div>
+              <div className="p-3 bg-red-50 rounded-lg">
+                <p className="text-lg font-bold text-red-600">
+                  {cbamaRecords.filter(r => r.riskLevel === 'high').length}
+                </p>
+                <p className="text-xs text-red-600">High Risk</p>
+              </div>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Categories and Records */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        {/* CBAM Categories */}
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center space-x-2">
+              <Factory className="h-5 w-5" />
+              <span>CBAM Categories</span>
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="space-y-4">
+              {Object.entries(stats.categoriesBreakdown).map(([category, count]) => (
+                <div 
+                  key={category}
+                  className={`p-4 rounded-lg border cursor-pointer transition-colors ${
+                    selectedCategory === category 
+                      ? 'border-accent bg-accent/5' 
+                      : 'hover:border-gray-300'
+                  }`}
+                  onClick={() => setSelectedCategory(
+                    selectedCategory === category ? null : category
+                  )}
+                >
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center space-x-3">
+                      {getCategoryIcon(category)}
+                      <div>
+                        <p className="font-medium capitalize">{category}</p>
+                        <p className="text-sm text-muted-foreground">
+                          {count} records
+                        </p>
+                      </div>
+                    </div>
+                    <div className="text-right">
+                      <p className="font-semibold">{count}</p>
+                      <p className="text-xs text-muted-foreground">
+                        {stats.totalRecords > 0 ? Math.round((count / stats.totalRecords) * 100) : 0}%
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </CardContent>
+        </Card>
+
+        {/* High Risk Records */}
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center space-x-2">
+              <AlertTriangle className="h-5 w-5" />
+              <span>High Risk Records</span>
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="space-y-4 max-h-96 overflow-y-auto">
+              {cbamaRecords
+                .filter(record => record.riskLevel === 'high')
+                .slice(0, 10)
+                .map((record) => (
+                <div key={record.id} className="p-4 border rounded-lg">
+                  <div className="flex items-start justify-between mb-2">
+                    <div className="flex-1">
+                      <p className="font-medium text-sm">{record.productDescription}</p>
+                      <p className="text-xs text-muted-foreground">
+                        {record.productCode} • {record.originCountry}
+                      </p>
+                    </div>
+                    <Badge className={getRiskColor(record.riskLevel)}>
+                      {getRiskIcon(record.riskLevel)}
+                      <span className="ml-1">{record.riskLevel}</span>
+                    </Badge>
+                  </div>
+                  
+                  <div className="flex items-center justify-between text-sm">
+                    <span className="text-muted-foreground">
+                      {formatCurrency(record.value)}
+                    </span>
+                    <div className="flex items-center space-x-2">
+                      <span className="text-xs text-muted-foreground">Score:</span>
+                      <span className="font-medium">{Math.round(record.complianceScore)}</span>
+                    </div>
+                  </div>
+                </div>
+              ))}
+              
+              {cbamaRecords.filter(r => r.riskLevel === 'high').length === 0 && (
+                <div className="text-center py-8">
+                  <CheckCircle className="h-12 w-12 text-green-600 mx-auto mb-4" />
+                  <p className="text-muted-foreground">No high-risk records found</p>
+                  <p className="text-sm text-muted-foreground mt-1">
+                    Your trade portfolio shows good CBAM compliance
+                  </p>
+                </div>
               )}
             </div>
           </CardContent>
         </Card>
       </div>
 
-      {/* CBAM Categories */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center space-x-2">
-            <Leaf className="w-5 h-5 text-green-500" />
-            <span>CBAM Categories</span>
-          </CardTitle>
-          <CardDescription>
-            Breakdown of your trade by CBAM-regulated categories
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          {Object.keys(stats.categories).length > 0 ? (
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-              {Object.entries(stats.categories).map(([category, count]) => (
-                <div key={category} className="p-4 border border-border rounded-lg">
-                  <div className="flex items-center justify-between mb-2">
-                    <h4 className="font-medium text-foreground">{category}</h4>
-                    <Badge variant="secondary">{count}</Badge>
-                  </div>
-                  <div className="w-full bg-muted rounded-full h-2">
-                    <div 
-                      className="bg-green-500 h-2 rounded-full" 
-                      style={{ 
-                        width: `${(count / stats.cbamRelevant) * 100}%` 
-                      }}
-                    ></div>
-                  </div>
-                  <p className="text-xs text-muted-foreground mt-1">
-                    {Math.round((count / stats.cbamRelevant) * 100)}% of CBAM records
-                  </p>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <div className="text-center py-8">
-              <Leaf className="w-12 h-12 text-muted-foreground mx-auto mb-4" />
-              <p className="text-muted-foreground">
-                No CBAM-relevant trade records found. Upload documents to see analysis.
-              </p>
-            </div>
-          )}
-        </CardContent>
-      </Card>
-
-      {/* CBAM Records Table */}
-      {cbamData.length > 0 && (
+      {/* Detailed Records Table */}
+      {stats.totalRecords > 0 && (
         <Card>
           <CardHeader>
-            <CardTitle>CBAM-Relevant Trade Records</CardTitle>
-            <CardDescription>
-              Detailed view of products subject to Carbon Border Adjustment Mechanism
-            </CardDescription>
+            <CardTitle>CBAM Records Details</CardTitle>
           </CardHeader>
           <CardContent>
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
                 <thead>
-                  <tr className="border-b border-border">
-                    <th className="text-left p-2 font-medium">Product</th>
-                    <th className="text-left p-2 font-medium">Category</th>
-                    <th className="text-left p-2 font-medium">Origin</th>
-                    <th className="text-left p-2 font-medium">Carbon Intensity</th>
-                    <th className="text-left p-2 font-medium">Value</th>
+                  <tr className="border-b">
+                    <th className="text-left p-2">Product</th>
+                    <th className="text-left p-2">Country</th>
+                    <th className="text-left p-2">Category</th>
+                    <th className="text-left p-2">Value</th>
+                    <th className="text-left p-2">Risk</th>
+                    <th className="text-left p-2">Score</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {cbamData.slice(0, 10).map((record, index) => (
-                    <tr key={index} className="border-b border-border/50">
+                  {cbamaRecords.slice(0, 20).map((record) => (
+                    <tr key={record.id} className="border-b hover:bg-gray-50">
                       <td className="p-2">
                         <div>
-                          <p className="font-medium">{record.productDescription || 'N/A'}</p>
-                          <p className="text-xs text-muted-foreground">{record.productCode}</p>
+                          <p className="font-medium">{record.productCode}</p>
+                          <p className="text-xs text-muted-foreground truncate max-w-xs">
+                            {record.productDescription}
+                          </p>
                         </div>
                       </td>
+                      <td className="p-2">{record.originCountry}</td>
                       <td className="p-2">
-                        <Badge variant="outline" className="bg-green-50 text-green-700">
-                          {record.cbamCategory}
+                        <Badge variant="secondary" className="text-xs capitalize">
+                          {record.cbamaCategory}
                         </Badge>
                       </td>
-                      <td className="p-2">{record.countryOrigin}</td>
+                      <td className="p-2">{formatCurrency(record.value)}</td>
                       <td className="p-2">
-                        <span className="font-medium">
-                          {record.carbonIntensity?.toFixed(2) || '0.00'}
-                        </span>
-                        <span className="text-xs text-muted-foreground ml-1">tCO2e/t</span>
+                        <Badge className={getRiskColor(record.riskLevel)}>
+                          {record.riskLevel}
+                        </Badge>
                       </td>
                       <td className="p-2">
-                        ${(record.valueUsd || 0).toLocaleString()}
+                        <span className="font-medium">{Math.round(record.complianceScore)}</span>
                       </td>
                     </tr>
                   ))}
                 </tbody>
               </table>
-              {cbamData.length > 10 && (
-                <p className="text-sm text-muted-foreground mt-4 text-center">
-                  Showing 10 of {cbamData.length} CBAM-relevant records
-                </p>
-              )}
             </div>
           </CardContent>
         </Card>
       )}
-
-      {/* Compliance Recommendations */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center space-x-2">
-            <AlertTriangle className="w-5 h-5 text-yellow-500" />
-            <span>Compliance Recommendations</span>
-          </CardTitle>
-          <CardDescription>
-            Actions to improve your CBAM compliance posture
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <div className="space-y-4">
-            <div className="flex items-start space-x-3 p-4 bg-blue-50 rounded-lg">
-              <div className="w-2 h-2 bg-blue-500 rounded-full mt-2"></div>
-              <div>
-                <h4 className="font-medium text-foreground">Monitor Carbon Intensity</h4>
-                <p className="text-sm text-muted-foreground">
-                  Track carbon intensity values for all CBAM-relevant imports to ensure accurate reporting.
-                </p>
-              </div>
-            </div>
-            
-            <div className="flex items-start space-x-3 p-4 bg-green-50 rounded-lg">
-              <div className="w-2 h-2 bg-green-500 rounded-full mt-2"></div>
-              <div>
-                <h4 className="font-medium text-foreground">Verify Origin Documentation</h4>
-                <p className="text-sm text-muted-foreground">
-                  Ensure all country of origin information is accurate and properly documented.
-                </p>
-              </div>
-            </div>
-            
-            <div className="flex items-start space-x-3 p-4 bg-yellow-50 rounded-lg">
-              <div className="w-2 h-2 bg-yellow-500 rounded-full mt-2"></div>
-              <div>
-                <h4 className="font-medium text-foreground">Prepare for CBAM Certificates</h4>
-                <p className="text-sm text-muted-foreground">
-                  Start collecting necessary documentation for CBAM certificate purchases when the system becomes mandatory.
-                </p>
-              </div>
-            </div>
-          </div>
-        </CardContent>
-      </Card>
     </div>
   )
 }
